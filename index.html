@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qualité de l'air – en direct</title>
+<style>
+  :root{
+    --fond:#f4f6f8; --carte:#ffffff; --texte:#1c2430; --doux:#66717f; --bord:#e3e7ec;
+    --bon:#1f9d55; --moyen:#e07b00; --mauvais:#d62828; --neutre:#8a94a3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --fond:#11161c; --carte:#1a2129; --texte:#e8edf2; --doux:#9aa5b1; --bord:#2a333d; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--fond);color:var(--texte);
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.35}
+  main{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+  header h1{font-size:1.35rem;margin:0}
+  header p{margin:4px 0 0;color:var(--doux);font-size:.9rem}
+  .etat{display:flex;align-items:center;gap:8px;margin:14px 0 18px;font-size:.9rem;color:var(--doux)}
+  .point{width:10px;height:10px;border-radius:50%;background:var(--neutre)}
+  .point.ok{background:var(--bon)} .point.ko{background:var(--mauvais)}
+  .grille{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:420px){ .grille{grid-template-columns:1fr} }
+  .carte{background:var(--carte);border:1px solid var(--bord);border-radius:14px;padding:14px 14px 10px;
+         border-left:6px solid var(--neutre)}
+  .carte.bon{border-left-color:var(--bon)} .carte.moyen{border-left-color:var(--moyen)} .carte.mauvais{border-left-color:var(--mauvais)}
+  .nom{font-size:.85rem;color:var(--doux);display:flex;justify-content:space-between}
+  .badge{font-weight:600}
+  .bon .badge{color:var(--bon)} .moyen .badge{color:var(--moyen)} .mauvais .badge{color:var(--mauvais)}
+  .valeur{font-size:2.2rem;font-weight:700;margin:2px 0}
+  .valeur small{font-size:.95rem;font-weight:500;color:var(--doux);margin-left:4px}
+  svg.courbe{width:100%;height:42px;display:block}
+  .petites{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+  @media (max-width:420px){ .petites{grid-template-columns:1fr 1fr} }
+  .petite{background:var(--carte);border:1px solid var(--bord);border-radius:12px;padding:10px;text-align:center}
+  .petite .v{font-size:1.25rem;font-weight:700}
+  .petite .n{font-size:.78rem;color:var(--doux)}
+  .alerte{display:none;background:var(--mauvais);color:#fff;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-weight:600}
+  .bouton{display:block;text-align:center;margin:20px 0 8px;padding:14px;border-radius:12px;
+          background:#229ED9;color:#fff;text-decoration:none;font-weight:600}
+  footer{color:var(--doux);font-size:.8rem;margin-top:18px}
+  footer a{color:inherit}
+  .legende{font-size:.8rem;color:var(--doux);margin-top:10px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Qualité de l'air intérieur</h1>
+    <p id="lieu">Analyseur ESP32 – Projet M1 BIEE, CY Tech</p>
+  </header>
+
+  <div class="etat"><span class="point" id="point"></span><span id="maj">Chargement…</span></div>
+  <div class="alerte" id="alerteCO"></div>
+
+  <section class="grille" id="grille"></section>
+
+  <section class="petites">
+    <div class="petite"><div class="v" id="v-t">–</div><div class="n">Température °C</div></div>
+    <div class="petite"><div class="v" id="v-rh">–</div><div class="n">Humidité %</div></div>
+    <div class="petite"><div class="v" id="v-pm1">–</div><div class="n">PM1 µg/m³</div></div>
+    <div class="petite"><div class="v" id="v-pm10">–</div><div class="n">PM10 µg/m³</div></div>
+  </section>
+  <p class="legende">Courbes : dernière heure. Vert = bon, orange = à surveiller, rouge = aérer.</p>
+
+  <a class="bouton" id="lienTelegram" href="#" target="_blank" rel="noopener">Recevoir les alertes sur Telegram</a>
+
+  <footer>
+    Seuils : CO₂ arrêté du 27/12/2022 (800 / 1500 ppm) · PM2,5 OMS 2021 (15 / 25 µg/m³) ·
+    CO valeurs guides Anses (9 / 26 ppm) · COV indice Sensirion (150 / 250).<br>
+    Données : <a id="lienTS" href="#" target="_blank" rel="noopener">ThingSpeak</a> · mise à jour toutes les 20 s.
+    <span id="demo"></span>
+  </footer>
+</main>
+
+<script>
+// ======================= À COMPLÉTER =======================
+const CANAL_THINGSPEAK = "3564755";          // numéro du canal ThingSpeak, ex. "2712345" (vide = mode démonstration)
+const CLE_LECTURE      = "";          // Read API Key (laisser vide si le canal est public)
+const LIEN_TELEGRAM    = "https://t.me/qualite_air_cytech";
+const NOM_DU_LIEU      = "Analyseur ESP32 – Projet M1 BIEE, CY Tech";
+// ===========================================================
+
+// Champs ThingSpeak : 1 CO2, 2 T, 3 HR, 4 COV, 5 PM1, 6 PM2,5, 7 PM10, 8 CO
+const GRANDEURS = [
+  {id:"co2",  nom:"CO₂",      champ:1, unite:"ppm",   seuils:[800,1500]},
+  {id:"cov",  nom:"COV",      champ:4, unite:"indice",seuils:[150,250]},
+  {id:"pm25", nom:"PM2,5",    champ:6, unite:"µg/m³", seuils:[15,25]},
+  {id:"co",   nom:"CO",       champ:8, unite:"ppm",   seuils:[9,26]},
+];
+
+document.getElementById("lieu").textContent = NOM_DU_LIEU;
+document.getElementById("lienTelegram").href = LIEN_TELEGRAM;
+document.getElementById("lienTS").href = CANAL_THINGSPEAK
+  ? "https://thingspeak.mathworks.com/channels/" + CANAL_THINGSPEAK : "https://thingspeak.mathworks.com";
+
+const grille = document.getElementById("grille");
+GRANDEURS.forEach(g => {
+  grille.insertAdjacentHTML("beforeend",
+    `<div class="carte" id="c-${g.id}">
+       <div class="nom"><span>${g.nom}</span><span class="badge" id="b-${g.id}">–</span></div>
+       <div class="valeur"><span id="v-${g.id}">–</span><small>${g.unite}</small></div>
+       <svg class="courbe" id="s-${g.id}" viewBox="0 0 100 40" preserveAspectRatio="none"></svg>
+     </div>`);
+});
+
+function niveau(v, s){ if (v == null || isNaN(v)) return ""; return v >= s[1] ? "mauvais" : v >= s[0] ? "moyen" : "bon"; }
+const TEXTE = {bon:"Bon", moyen:"Moyen", mauvais:"Aérer"};
+const COULEUR = {bon:"var(--bon)", moyen:"var(--moyen)", mauvais:"var(--mauvais)", "":"var(--neutre)"};
+
+function courbe(svg, valeurs, s){
+  const pts = valeurs.filter(v => v != null && !isNaN(v));
+  if (pts.length < 2){ svg.innerHTML = ""; return; }
+  const max = Math.max(...pts, s[1] * 1.1), min = Math.min(...pts, 0);
+  const x = i => (i / (valeurs.length - 1)) * 100;
+  const y = v => 38 - ((v - min) / (max - min || 1)) * 36;
+  let d = "", premier = true;
+  valeurs.forEach((v, i) => { if (v == null || isNaN(v)) return; d += (premier ? "M" : "L") + x(i).toFixed(1) + " " + y(v).toFixed(1) + " "; premier = false; });
+  const lim = (v, c) => `<line x1="0" x2="100" y1="${y(v)}" y2="${y(v)}" stroke="${c}" stroke-width=".6" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" opacity=".7"/>`;
+  const dernier = niveau(pts[pts.length - 1], s);
+  svg.innerHTML = lim(s[0], "var(--moyen)") + lim(s[1], "var(--mauvais)") +
+    `<path d="${d}" fill="none" stroke="${COULEUR[dernier]}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+}
+
+function dernier(feeds, champ){
+  for (let i = feeds.length - 1; i >= 0; i--){ const v = parseFloat(feeds[i]["field" + champ]); if (!isNaN(v)) return v; }
+  return null;
+}
+
+function afficher(feeds){
+  if (!feeds.length){ document.getElementById("maj").textContent = "Aucune donnée reçue pour l'instant."; return; }
+  GRANDEURS.forEach(g => {
+    const v = dernier(feeds, g.champ), n = niveau(v, g.seuils);
+    document.getElementById("v-" + g.id).textContent = v == null ? "–" : Math.round(v);
+    document.getElementById("b-" + g.id).textContent = n ? TEXTE[n] : "–";
+    document.getElementById("c-" + g.id).className = "carte " + n;
+    courbe(document.getElementById("s-" + g.id), feeds.map(f => parseFloat(f["field" + g.champ])), g.seuils);
+  });
+  const fmt = (c, d) => { const v = dernier(feeds, c); return v == null ? "–" : v.toFixed(d); };
+  document.getElementById("v-t").textContent = fmt(2, 1);
+  document.getElementById("v-rh").textContent = fmt(3, 0);
+  document.getElementById("v-pm1").textContent = fmt(5, 0);
+  document.getElementById("v-pm10").textContent = fmt(7, 0);
+
+  const co = dernier(feeds, 8), alerte = document.getElementById("alerteCO");
+  if (co != null && co >= 50){ alerte.style.display = "block"; alerte.textContent = `Monoxyde de carbone élevé (${Math.round(co)} ppm) : aérez et quittez la pièce.`; }
+  else alerte.style.display = "none";
+
+  const t = new Date(feeds[feeds.length - 1].created_at), age = (Date.now() - t) / 1000;
+  const enLigne = age < 120;
+  document.getElementById("point").className = "point " + (enLigne ? "ok" : "ko");
+  document.getElementById("maj").textContent = (enLigne ? "En direct · " : "Analyseur hors ligne · dernière mesure ") +
+    t.toLocaleTimeString("fr-FR", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+}
+
+// Mode démonstration : données simulées tant que le canal n'est pas renseigné
+let demo = [];
+function genererDemo(){
+  const n = demo.length, t = Date.now();
+  const co2 = 650 + 500 * Math.max(0, Math.sin(n / 40)) + Math.random() * 30;
+  demo.push({created_at:new Date(t).toISOString(),
+    field1:co2, field2:21 + Math.random(), field3:48 + Math.random() * 3, field4:100 + 60 * Math.sin(n / 25) + Math.random() * 10,
+    field5:5 + Math.random() * 3, field6:9 + 8 * Math.max(0, Math.sin(n / 30)) + Math.random() * 2, field7:14 + Math.random() * 5, field8:1 + Math.random()});
+  if (demo.length > 180) demo.shift();
+}
+
+async function charger(){
+  if (!CANAL_THINGSPEAK){ genererDemo(); afficher(demo); return; }
+  try{
+    const url = `https://api.thingspeak.com/channels/${CANAL_THINGSPEAK}/feeds.json?results=180` + (CLE_LECTURE ? `&api_key=${CLE_LECTURE}` : "");
+    const r = await fetch(url, {cache:"no-store"});
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    afficher(j.feeds || []);
+  } catch(e){
+    document.getElementById("point").className = "point ko";
+    document.getElementById("maj").textContent = "Impossible de joindre ThingSpeak (canal privé ou réseau).";
+  }
+}
+
+if (!CANAL_THINGSPEAK){
+  document.getElementById("demo").textContent = " · Mode démonstration : valeurs simulées.";
+  for (let i = 0; i < 120; i++) genererDemo();
+}
+charger();
+setInterval(charger, CANAL_THINGSPEAK ? 20000 : 2000);
+</script>
+</body>
+</html>
