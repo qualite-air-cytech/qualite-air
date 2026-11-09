@@ -77,7 +77,7 @@
 
   <section class="export">
     <h2>Exporter vers Excel</h2>
-    <p>Fichier .xlsx avec toutes les mesures et les courbes déjà tracées.</p>
+    <p>Fichier .xlsx avec toutes les mesures, les courbes déjà tracées et le confort thermique sur le diagramme de l'air humide.</p>
     <div class="ligne">
       <select id="periode">
         <option value="1">Dernières 24 heures</option>
@@ -317,6 +317,150 @@ function dessin(){
 <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${ancres}</xdr:wsDr>`;
 }
 
+
+// ============ CONFORT THERMIQUE : DIAGRAMME DE L'AIR HUMIDE ============
+// x = 622 · pv / (P − pv), pv = HR · psat(T), psat : formule de Magnus (Pa)
+const P_ATM = 101325;
+const CONF = {tMin:20, tMax:26, hrMin:30, hrMax:70, xMax:12};   // zone de confort
+const psat = T => 610.94 * Math.exp(17.625 * T / (T + 243.04));
+const humAbs = (T, hr) => { const pv = hr / 100 * psat(T); return 622 * pv / (P_ATM - pv); };
+function classeConfort(T, hr, x){
+  if (T < CONF.tMin) return "Trop froid";
+  if (T > CONF.tMax) return "Trop chaud";
+  if (hr < CONF.hrMin) return "Trop sec";
+  if (hr > CONF.hrMax || x > CONF.xMax) return "Trop humide";
+  return "Confort";
+}
+// Température où la courbe HR atteint x donné (dichotomie)
+function tPourX(hr, x){ let a = -10, b = 50; for (let i = 0; i < 60; i++){ const m = (a + b) / 2; humAbs(m, hr) < x ? a = m : b = m; } return (a + b) / 2; }
+// Contour de la zone de confort, dans le sens du tracé
+function polygoneConfort(){
+  const pts = [];
+  for (let T = CONF.tMin; T <= CONF.tMax + 1e-9; T += 0.5) pts.push([T, humAbs(T, CONF.hrMin)]);
+  const xHaut = Math.min(humAbs(CONF.tMax, CONF.hrMax), CONF.xMax);
+  pts.push([CONF.tMax, xHaut]);
+  const tCoin = Math.max(CONF.tMin, Math.min(CONF.tMax, tPourX(CONF.hrMax, CONF.xMax)));
+  if (humAbs(CONF.tMax, CONF.hrMax) > CONF.xMax) pts.push([tCoin, CONF.xMax]);
+  for (let T = Math.floor(tCoin * 2) / 2; T >= CONF.tMin - 1e-9; T -= 0.5) if (T < tCoin) pts.push([T, humAbs(T, CONF.hrMax)]);
+  if (pts[pts.length - 1][0] > CONF.tMin) pts.push([CONF.tMin, humAbs(CONF.tMin, CONF.hrMax)]);
+  pts.push(pts[0]);
+  return pts;
+}
+const COURBES_HR = [100, 70, 50, 30];
+const T_DIAG = []; for (let T = 10; T <= 35; T++) T_DIAG.push(T);
+
+// Lignes de mesures exploitables (T et HR présentes)
+function mesuresConfort(feeds){
+  return feeds.map(f => ({d: new Date(f.created_at), T: parseFloat(f.field2), hr: parseFloat(f.field3)}))
+              .filter(m => !isNaN(m.T) && !isNaN(m.hr));
+}
+
+function feuilleConfort(feeds){
+  const M = mesuresConfort(feeds);
+  const cell = (ref, v, st) => `<c r="${ref}"${st ? ` s="${st}"` : ""}><v>${v}</v></c>`;
+  const txt  = (ref, t, st) => `<c r="${ref}" t="inlineStr"${st ? ` s="${st}"` : ""}><is><t>${xmlEsc(t)}</t></is></c>`;
+  const frm  = (ref, f, v, st) => `<c r="${ref}"${st ? ` s="${st}"` : ""}><f>${xmlEsc(f)}</f><v>${v}</v></c>`;
+  const frmT = (ref, f, v) => `<c r="${ref}" t="str"><f>${xmlEsc(f)}</f><v>${xmlEsc(v)}</v></c>`;
+  const rows = {};
+  const add = (r, c) => (rows[r] = rows[r] || []).push(c);
+
+  ["Date et heure","Température (°C)","Humidité (%)","psat (Pa)","pv (Pa)","x (g/kg as)","Confort"]
+    .forEach((t, i) => add(1, txt(String.fromCharCode(65 + i) + "1", t, 2)));
+  const comptes = {"Confort":0,"Trop froid":0,"Trop chaud":0,"Trop sec":0,"Trop humide":0};
+  M.forEach((m, k) => {
+    const r = k + 2, ps = psat(m.T), pv = m.hr / 100 * ps, x = 622 * pv / (P_ATM - pv), cl = classeConfort(m.T, m.hr, x);
+    comptes[cl]++;
+    add(r, cell(`A${r}`, serieExcel(m.d).toFixed(6), 1));
+    add(r, cell(`B${r}`, +m.T.toFixed(1)));
+    add(r, cell(`C${r}`, +m.hr.toFixed(0)));
+    add(r, frm(`D${r}`, `610.94*EXP(17.625*B${r}/(B${r}+243.04))`, ps.toFixed(1), 3));
+    add(r, frm(`E${r}`, `C${r}/100*D${r}`, pv.toFixed(1), 3));
+    add(r, frm(`F${r}`, `622*E${r}/(${P_ATM}-E${r})`, x.toFixed(2), 4));
+    add(r, frmT(`G${r}`, `IF(B${r}<${CONF.tMin},"Trop froid",IF(B${r}>${CONF.tMax},"Trop chaud",IF(C${r}<${CONF.hrMin},"Trop sec",IF(OR(C${r}>${CONF.hrMax},F${r}>${CONF.xMax}),"Trop humide","Confort"))))`, cl));
+  });
+  const n = Math.max(M.length, 1), der = n + 1;
+
+  // Bilan (colonnes I-K)
+  add(1, txt("I1", "Bilan du confort thermique", 2)); add(1, txt("J1", "Mesures", 2)); add(1, txt("K1", "Part du temps", 2));
+  Object.keys(comptes).forEach((cl, i) => {
+    const r = i + 2;
+    add(r, txt(`I${r}`, cl));
+    add(r, frm(`J${r}`, `COUNTIF($G$2:$G$${der},I${r})`, comptes[cl]));
+    add(r, frm(`K${r}`, `IF(SUM($J$2:$J$6)=0,0,J${r}/SUM($J$2:$J$6))`, M.length ? (comptes[cl] / M.length).toFixed(4) : 0, 5));
+  });
+  add(8, txt("I8", `Zone de confort : ${CONF.tMin} à ${CONF.tMax} °C, ${CONF.hrMin} à ${CONF.hrMax} % HR, x ≤ ${CONF.xMax} g/kg`));
+  add(9, txt("I9", "x = 622·pv/(P − pv), pv = HR·psat(T), psat = 610,94·exp(17,625·T/(T+243,04)), P = 101 325 Pa"));
+
+  // Données du diagramme (colonnes V-Z : courbes HR ; AB-AC : zone de confort)
+  add(11, txt("V11", "T (°C)", 2));
+  COURBES_HR.forEach((h, j) => add(11, txt(String.fromCharCode(87 + j) + "11", `HR ${h} %`, 2)));
+  T_DIAG.forEach((T, k) => {
+    const r = 12 + k;
+    add(r, cell(`V${r}`, T));
+    COURBES_HR.forEach((h, j) => { const col = String.fromCharCode(87 + j);
+      add(r, frm(`${col}${r}`, `622*(${h}/100*610.94*EXP(17.625*$V${r}/($V${r}+243.04)))/(${P_ATM}-${h}/100*610.94*EXP(17.625*$V${r}/($V${r}+243.04)))`, humAbs(T, h).toFixed(2), 4)); });
+  });
+  add(11, txt("AB11", "Zone T (°C)", 2)); add(11, txt("AC11", "Zone x (g/kg)", 2));
+  polygoneConfort().forEach(([T, x], k) => { const r = 12 + k; add(r, cell(`AB${r}`, +T.toFixed(2))); add(r, cell(`AC${r}`, +x.toFixed(2))); });
+
+  const lignes = Object.keys(rows).map(Number).sort((a, b) => a - b).map(r => {
+    const cs = rows[r].sort((a, b) => { const ca = a.match(/r="([A-Z]+)/)[1], cb = b.match(/r="([A-Z]+)/)[1]; return ca.length - cb.length || (ca < cb ? -1 : 1); });
+    return `<row r="${r}">${cs.join("")}</row>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+<cols><col min="1" max="1" width="20" customWidth="1"/><col min="2" max="7" width="14" customWidth="1"/><col min="9" max="9" width="26" customWidth="1"/><col min="10" max="11" width="13" customWidth="1"/><col min="22" max="29" width="11" customWidth="1"/></cols>
+<sheetData>${lignes}</sheetData>
+<drawing r:id="rId1"/>
+</worksheet>`;
+}
+
+function graphiqueConfort(feeds){
+  const n = Math.max(mesuresConfort(feeds).length, 1), nP = polygoneConfort().length, nT = T_DIAG.length;
+  const ser = (i, nom, xs, ys, ligne) => `<c:ser><c:idx val="${i}"/><c:order val="${i}"/>
+<c:tx><c:v>${xmlEsc(nom)}</c:v></c:tx>${ligne}
+<c:xVal><c:numRef><c:f>Confort!${xs}</c:f></c:numRef></c:xVal>
+<c:yVal><c:numRef><c:f>Confort!${ys}</c:f></c:numRef></c:yVal><c:smooth val="0"/></c:ser>`;
+  const trait = (coul, w, tirets) => `<c:spPr><a:ln w="${w}"><a:solidFill><a:srgbClr val="${coul}"/></a:solidFill>${tirets ? '<a:prstDash val="dash"/>' : ""}</a:ln></c:spPr><c:marker><c:symbol val="none"/></c:marker>`;
+  const points = `<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr><c:marker><c:symbol val="circle"/><c:size val="4"/><c:spPr><a:solidFill><a:srgbClr val="1F77B4"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr></c:marker>`;
+  const coulHR = {100:"404040", 70:"8A8A8A", 50:"8A8A8A", 30:"8A8A8A"};
+  let series = ser(0, "Mesures", `$B$2:$B$${n + 1}`, `$F$2:$F$${n + 1}`, points);
+  series += ser(1, "Zone de confort", `$AB$12:$AB$${11 + nP}`, `$AC$12:$AC$${11 + nP}`, trait("1F9D55", 28575, false));
+  COURBES_HR.forEach((h, j) => { const col = String.fromCharCode(87 + j);
+    series += ser(2 + j, `HR ${h} %`, `$V$12:$V$${11 + nT}`, `$${col}$12:$${col}$${11 + nT}`, trait(coulHR[h], h == 100 ? 22225 : 12700, h != 100)); });
+  const axe = (id, cross, pos, titre, min, max, unit, grille) => `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/><c:max val="${max}"/><c:min val="${min}"/></c:scaling><c:delete val="0"/><c:axPos val="${pos}"/>${grille ? "<c:majorGridlines/>" : ""}
+<c:title>${texteRiche(titre, 1000)}<c:overlay val="0"/></c:title>
+<c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>
+<c:crossAx val="${cross}"/><c:crosses val="min"/><c:crossBetween val="midCat"/><c:majorUnit val="${unit}"/></c:valAx>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<c:roundedCorners val="0"/>
+<c:chart>
+<c:title>${texteRiche("Confort thermique – diagramme de l'air humide (P = 101 325 Pa)", 1300)}<c:overlay val="0"/></c:title>
+<c:autoTitleDeleted val="0"/>
+<c:plotArea><c:layout/>
+<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>${series}<c:axId val="600001"/><c:axId val="600002"/></c:scatterChart>
+${axe(600001, 600002, "b", "Température sèche (°C)", 10, 35, 5, true)}
+${axe(600002, 600001, "l", "Humidité absolue x (g/kg air sec)", 0, 25, 5, true)}
+</c:plotArea>
+<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>
+<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>
+</c:chart>
+</c:chartSpace>`;
+}
+
+function dessinConfort(){
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor>
+<xdr:from><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>10</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>20</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>38</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Diagramme air humide"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic>
+</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`;
+}
+
 function fichiersXlsx(feeds){
   const n = Math.max(feeds.length, 1);
   const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -329,6 +473,9 @@ function fichiersXlsx(feeds){
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+<Override PartName="/xl/charts/chartConfort.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
 ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join("\n")}
@@ -338,25 +485,29 @@ ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" Co
     "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${R}">
 <bookViews><workbookView activeTab="1"/></bookViews>
-<sheets><sheet name="Mesures" sheetId="1" r:id="rId1"/><sheet name="Courbes" sheetId="2" r:id="rId2"/></sheets>
+<sheets><sheet name="Mesures" sheetId="1" r:id="rId1"/><sheet name="Courbes" sheetId="2" r:id="rId2"/><sheet name="Confort" sheetId="3" r:id="rId4"/></sheets>
 </workbook>`,
     "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}">
 <Relationship Id="rId1" Type="${R}/worksheet" Target="worksheets/sheet1.xml"/>
 <Relationship Id="rId2" Type="${R}/worksheet" Target="worksheets/sheet2.xml"/>
 <Relationship Id="rId3" Type="${R}/styles" Target="styles.xml"/>
+<Relationship Id="rId4" Type="${R}/worksheet" Target="worksheets/sheet3.xml"/>
 </Relationships>`,
     "xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm:ss"/></numFmts>
+<numFmts count="3"><numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm:ss"/><numFmt numFmtId="165" formatCode="0.0"/><numFmt numFmtId="166" formatCode="0.0%"/></numFmts>
 <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
 <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFE2EFDA"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`,
     "xl/worksheets/sheet1.xml": feuilleMesures(feeds),
@@ -364,6 +515,13 @@ ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" Co
     "xl/worksheets/_rels/sheet2.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`,
     "xl/drawings/drawing1.xml": dessin(),
+    "xl/worksheets/sheet3.xml": feuilleConfort(feeds),
+    "xl/worksheets/_rels/sheet3.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${R}/drawing" Target="../drawings/drawing2.xml"/></Relationships>`,
+    "xl/drawings/drawing2.xml": dessinConfort(),
+    "xl/drawings/_rels/drawing2.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${R}/chart" Target="../charts/chartConfort.xml"/></Relationships>`,
+    "xl/charts/chartConfort.xml": graphiqueConfort(feeds),
     "xl/drawings/_rels/drawing1.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}">${GRAPHIQUES.map((g, i) => `<Relationship Id="rId${i + 1}" Type="${R}/chart" Target="../charts/chart${i + 1}.xml"/>`).join("")}</Relationships>`,
   };
