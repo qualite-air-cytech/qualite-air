@@ -77,7 +77,7 @@
 
   <section class="export">
     <h2>Exporter vers Excel</h2>
-    <p>Fichier .xlsx avec toutes les mesures, les courbes déjà tracées et le confort thermique sur le diagramme de l'air humide.</p>
+    <p>Fichier .xlsx avec toutes les mesures, les courbes déjà tracées, le confort thermique sur le diagramme de l'air humide et un bilan jour par jour.</p>
     <div class="ligne">
       <select id="periode">
         <option value="1">Dernières 24 heures</option>
@@ -461,6 +461,122 @@ function dessinConfort(){
 </xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`;
 }
 
+// ============ BILAN JOURNALIER ============
+// Une ligne par jour : nombre de mesures, T et HR min/moy/max, CO max,
+// part du temps en confort (même zone que la feuille « Confort »), point de rosée moyen.
+const pointRosee = (T, hr) => { const g = Math.log(hr / 100) + 17.625 * T / (243.04 + T); return 243.04 * g / (17.625 - g); };
+const cleJour = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+function joursBilan(feeds){
+  const jours = new Map();
+  feeds.forEach(f => {
+    const d = new Date(f.created_at), k = cleJour(d);
+    if (!jours.has(k)) jours.set(k, {d: new Date(d.getFullYear(), d.getMonth(), d.getDate()), n:0, t:[], hr:[], co:[], conf:0, nc:0, rosee:[]});
+    const j = jours.get(k);
+    j.n++;
+    const T = parseFloat(f.field2), H = parseFloat(f.field3), C = parseFloat(f.field8);
+    if (!isNaN(T)) j.t.push(T);
+    if (!isNaN(H)) j.hr.push(H);
+    if (!isNaN(C)) j.co.push(C);
+    if (!isNaN(T) && !isNaN(H) && H > 0) {
+      j.nc++;
+      if (classeConfort(T, H, humAbs(T, H)) === "Confort") j.conf++;
+      j.rosee.push(pointRosee(T, H));
+    }
+  });
+  return [...jours.values()].sort((a, b) => a.d - b.d);
+}
+
+const moy = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+const mini = a => a.length ? Math.min(...a) : null;
+const maxi = a => a.length ? Math.max(...a) : null;
+
+const COLS_BILAN = [
+  {t:"Jour", f:j => serieExcel(j.d), st:6},
+  {t:"Mesures", f:j => j.n},
+  {t:"T min (°C)", f:j => mini(j.t), st:3}, {t:"T moy (°C)", f:j => moy(j.t), st:3}, {t:"T max (°C)", f:j => maxi(j.t), st:3},
+  {t:"HR min (%)", f:j => mini(j.hr), st:3}, {t:"HR moy (%)", f:j => moy(j.hr), st:3}, {t:"HR max (%)", f:j => maxi(j.hr), st:3},
+  {t:"CO max (ppm)", f:j => maxi(j.co), st:3},
+  {t:"Temps en confort", f:j => j.nc ? j.conf / j.nc : null, st:5},
+  {t:"Point de rosée moy (°C)", f:j => moy(j.rosee), st:3},
+];
+
+function feuilleBilan(feeds){
+  const J = joursBilan(feeds);
+  const col = i => String.fromCharCode(65 + i);
+  let lignes = `<row r="1">` + COLS_BILAN.map((c, i) => `<c r="${col(i)}1" t="inlineStr" s="2"><is><t>${xmlEsc(c.t)}</t></is></c>`).join("") + `</row>`;
+  J.forEach((j, k) => {
+    const r = k + 2;
+    lignes += `<row r="${r}">` + COLS_BILAN.map((c, i) => {
+      const v = c.f(j);
+      return v == null || isNaN(v) ? "" : `<c r="${col(i)}${r}"${c.st ? ` s="${c.st}"` : ""}><v>${+(+v).toFixed(6)}</v></c>`;
+    }).join("") + `</row>`;
+  });
+  const fin = J.length + 3;
+  lignes += `<row r="${fin}"><c r="A${fin}" t="inlineStr"><is><t>${xmlEsc(`Confort : ${CONF.tMin} à ${CONF.tMax} °C, ${CONF.hrMin} à ${CONF.hrMax} % HR, x ≤ ${CONF.xMax} g/kg (comme la feuille « Confort »). Point de rosée : formule de Magnus.`)}</t></is></c></row>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+<cols><col min="1" max="1" width="12" customWidth="1"/><col min="2" max="9" width="13" customWidth="1"/><col min="10" max="10" width="17" customWidth="1"/><col min="11" max="11" width="22" customWidth="1"/></cols>
+<sheetData>${lignes}</sheetData>
+<drawing r:id="rId1"/>
+</worksheet>`;
+}
+
+// 3 graphiques : température, humidité (min / moy / max) et part du temps en confort
+const GRAPHIQUES_BILAN = [
+  {titre:"Température par jour", unite:"°C", cols:["C","D","E"], coul:["5B9BD5","E15759","F28E2B"], fmt:"General"},
+  {titre:"Humidité par jour", unite:"%", cols:["F","G","H"], coul:["B07AA1","4E79A7","76B7B2"], fmt:"General"},
+  {titre:"Part du temps en confort", unite:"%", cols:["J"], coul:["59A14F"], fmt:"0%"},
+];
+
+function graphiqueBilan(g, nJours){
+  const der = Math.max(nJours, 1) + 1;
+  const series = g.cols.map((col, i) => `<c:ser><c:idx val="${i}"/><c:order val="${i}"/>
+<c:tx><c:strRef><c:f>'Bilan journalier'!$${col}$1</c:f></c:strRef></c:tx>
+<c:spPr><a:ln w="22225"><a:solidFill><a:srgbClr val="${g.coul[i]}"/></a:solidFill></a:ln></c:spPr>
+<c:marker><c:symbol val="circle"/><c:size val="6"/><c:spPr><a:solidFill><a:srgbClr val="${g.coul[i]}"/></a:solidFill></c:spPr></c:marker>
+<c:xVal><c:numRef><c:f>'Bilan journalier'!$A$2:$A$${der}</c:f></c:numRef></c:xVal>
+<c:yVal><c:numRef><c:f>'Bilan journalier'!$${col}$2:$${col}$${der}</c:f></c:numRef></c:yVal>
+<c:smooth val="0"/></c:ser>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<c:roundedCorners val="0"/>
+<c:chart>
+<c:title>${texteRiche(g.titre, 1400)}<c:overlay val="0"/></c:title>
+<c:autoTitleDeleted val="0"/>
+<c:plotArea><c:layout/>
+<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>${series}<c:axId val="700001"/><c:axId val="700002"/></c:scatterChart>
+<c:valAx><c:axId val="700001"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>
+<c:numFmt formatCode="dd/mm" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>
+<c:crossAx val="700002"/><c:crosses val="autoZero"/><c:crossBetween val="midCat"/><c:majorUnit val="1"/></c:valAx>
+<c:valAx><c:axId val="700002"/><c:scaling><c:orientation val="minMax"/>${g.fmt === "0%" ? '<c:max val="1"/><c:min val="0"/>' : ""}</c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/>
+<c:title>${texteRiche(g.unite, 1000)}<c:overlay val="0"/></c:title>
+<c:numFmt formatCode="${g.fmt}" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>
+<c:crossAx val="700001"/><c:crosses val="min"/><c:crossBetween val="midCat"/></c:valAx>
+</c:plotArea>
+<c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>
+<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>
+</c:chart>
+</c:chartSpace>`;
+}
+
+function dessinBilan(nJours){
+  const r0 = nJours + 5;
+  const ancres = GRAPHIQUES_BILAN.map((g, i) => {
+    const c0 = i * 8;
+    return `<xdr:twoCellAnchor>
+<xdr:from><xdr:col>${c0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${r0}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>${c0 + 7}</xdr:col><xdr:colOff>400000</xdr:colOff><xdr:row>${r0 + 20}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i + 2}" name="${xmlEsc(g.titre)}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId${i + 1}"/></a:graphicData></a:graphic>
+</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${ancres}</xdr:wsDr>`;
+}
+
 function fichiersXlsx(feeds){
   const n = Math.max(feeds.length, 1);
   const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -476,6 +592,9 @@ function fichiersXlsx(feeds){
 <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 <Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
 <Override PartName="/xl/charts/chartConfort.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+<Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/drawings/drawing3.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+${GRAPHIQUES_BILAN.map((g, i) => `<Override PartName="/xl/charts/chartBilan${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join("\n")}
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
 ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join("\n")}
@@ -485,7 +604,7 @@ ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" Co
     "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${R}">
 <bookViews><workbookView activeTab="1"/></bookViews>
-<sheets><sheet name="Mesures" sheetId="1" r:id="rId1"/><sheet name="Courbes" sheetId="2" r:id="rId2"/><sheet name="Confort" sheetId="3" r:id="rId4"/></sheets>
+<sheets><sheet name="Mesures" sheetId="1" r:id="rId1"/><sheet name="Courbes" sheetId="2" r:id="rId2"/><sheet name="Confort" sheetId="3" r:id="rId4"/><sheet name="Bilan journalier" sheetId="4" r:id="rId5"/></sheets>
 </workbook>`,
     "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}">
@@ -493,21 +612,23 @@ ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" Co
 <Relationship Id="rId2" Type="${R}/worksheet" Target="worksheets/sheet2.xml"/>
 <Relationship Id="rId3" Type="${R}/styles" Target="styles.xml"/>
 <Relationship Id="rId4" Type="${R}/worksheet" Target="worksheets/sheet3.xml"/>
+<Relationship Id="rId5" Type="${R}/worksheet" Target="worksheets/sheet4.xml"/>
 </Relationships>`,
     "xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<numFmts count="3"><numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm:ss"/><numFmt numFmtId="165" formatCode="0.0"/><numFmt numFmtId="166" formatCode="0.0%"/></numFmts>
+<numFmts count="4"><numFmt numFmtId="164" formatCode="dd/mm/yyyy hh:mm:ss"/><numFmt numFmtId="165" formatCode="0.0"/><numFmt numFmtId="166" formatCode="0.0%"/><numFmt numFmtId="167" formatCode="dd/mm/yyyy"/></numFmts>
 <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
 <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFE2EFDA"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
 <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
-<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>
+<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`,
     "xl/worksheets/sheet1.xml": feuilleMesures(feeds),
@@ -522,10 +643,18 @@ ${GRAPHIQUES.map((g, i) => `<Override PartName="/xl/charts/chart${i + 1}.xml" Co
     "xl/drawings/_rels/drawing2.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${R}/chart" Target="../charts/chartConfort.xml"/></Relationships>`,
     "xl/charts/chartConfort.xml": graphiqueConfort(feeds),
+    "xl/worksheets/sheet4.xml": feuilleBilan(feeds),
+    "xl/worksheets/_rels/sheet4.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${R}/drawing" Target="../drawings/drawing3.xml"/></Relationships>`,
+    "xl/drawings/drawing3.xml": dessinBilan(joursBilan(feeds).length),
+    "xl/drawings/_rels/drawing3.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PR}">${GRAPHIQUES_BILAN.map((g, i) => `<Relationship Id="rId${i + 1}" Type="${R}/chart" Target="../charts/chartBilan${i + 1}.xml"/>`).join("")}</Relationships>`,
     "xl/drawings/_rels/drawing1.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PR}">${GRAPHIQUES.map((g, i) => `<Relationship Id="rId${i + 1}" Type="${R}/chart" Target="../charts/chart${i + 1}.xml"/>`).join("")}</Relationships>`,
   };
   GRAPHIQUES.forEach((g, i) => f[`xl/charts/chart${i + 1}.xml`] = graphique(g, n));
+  const nJours = joursBilan(feeds).length;
+  GRAPHIQUES_BILAN.forEach((g, i) => f[`xl/charts/chartBilan${i + 1}.xml`] = graphiqueBilan(g, nJours));
   return f;
 }
 
